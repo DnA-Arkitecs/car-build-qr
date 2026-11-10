@@ -1,12 +1,12 @@
-"""End-to-end dry run in real browsers: iPhone Safari (WebKit, iPhone 15 profile)
-and Edge (or Chrome) on a phone-size screen.
+"""End-to-end dry run in real browsers: iPhone Safari (WebKit, iPhone 15 profile),
+Android Chrome (Chromium, Pixel 7 profile) and Edge on a phone-size screen.
 
 An owner builds a car, the rendered sticker is scanned by a real QR decoder,
 and the scanned link is opened on a second, fresh phone the way a stranger at a
 show would. Also checks hostile and damaged links, backups, printing and the
 page's security policy.
 
-Run: python test/e2e.py [--browser webkit|edge|all]   (screenshots in test/out/)
+Run: python test/e2e.py [--browser webkit|android|edge|all]   (screenshots in test/out/)
 """
 import argparse
 import base64
@@ -53,6 +53,15 @@ def launch(p, kind):
         device = dict(p.devices["iPhone 15"])
         device.pop("default_browser_type", None)
         return p.webkit.launch(), device, "iPhone Safari (WebKit)"
+    if kind == "android":
+        device = dict(p.devices["Pixel 7"])
+        device.pop("default_browser_type", None)
+        for channel in ("chrome", "msedge"):
+            try:
+                return p.chromium.launch(channel=channel), device, f"Android Chrome profile (Pixel 7) on {channel}"
+            except Exception:  # noqa: BLE001 - try the next installed browser
+                continue
+        return p.chromium.launch(), device, "Android Chrome profile (Pixel 7) on chromium"
     for channel in ("msedge", "chrome"):
         try:
             return p.chromium.launch(channel=channel), PHONE, f"{channel} phone screen"
@@ -308,15 +317,15 @@ def suite(p, kind, base, tag):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--browser", choices=["webkit", "edge", "all"], default="all")
+    ap.add_argument("--browser", choices=["webkit", "android", "edge", "all"], default="all")
     args = ap.parse_args()
-    kinds = ["webkit", "edge"] if args.browser == "all" else [args.browser]
+    kinds = ["webkit", "android", "edge"] if args.browser == "all" else [args.browser]
     OUT.mkdir(parents=True, exist_ok=True)
     server, base = start_server()
     with sync_playwright() as p:
         for kind in kinds:
             try:
-                suite(p, kind, base, "iphone" if kind == "webkit" else "edge")
+                suite(p, kind, base, {"webkit": "iphone", "android": "android"}.get(kind, "edge"))
             except Exception as e:  # noqa: BLE001 - report and carry on to the next browser
                 check(f"[{kind}] suite ran to the end", False, repr(e)[:300])
     server.shutdown()

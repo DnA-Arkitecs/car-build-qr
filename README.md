@@ -42,14 +42,14 @@ One static page does both jobs: with a build after `#` it shows the build, witho
 
 **Print sizes come from the square size.** For each print (2, 3 and 4-inch stickers and a letter-size dash card) the app works out how wide one QR square prints. At 0.8 mm or more it is easy to scan from arm's length; from 0.6 mm it scans from close up; below 0.6 mm the size is switched off. In practice about 25 mods with part numbers and short notes fit a 4-inch sticker; when every mod also carries a shop link, the build moves to the dash card, whose 6.5-inch QR prints squares of about 1.2 mm for that case (both cases are unit tests).
 
-**iPhone first.** The person scanning needs nothing but the camera: the QR opens in Safari. Making and editing a build works in iPhone Safari too: the browser dry run runs on WebKit (26.6) with Playwright's iPhone 15 profile as well as on Edge. A browser without `CompressionStream` gets a plain message asking for an update instead of a broken page. "Add to Home Screen" gives it an icon.
+**iPhone first.** The person scanning needs nothing but the camera: the QR opens in Safari. Making and editing a build works in iPhone Safari too: the browser dry run runs on WebKit (26.6) with Playwright's iPhone 15 profile, on Chrome with the Android Pixel 7 profile, and on Edge. Android needs no separate app either. Before the site is public, `tools/phone.py` opens it on a paired Android phone through `adb reverse`: the PC serves on 127.0.0.1 only and the phone reaches it at `http://localhost:8765/` over the debugging link, so nothing is exposed to the network. A browser without `CompressionStream` gets a plain message asking for an update instead of a broken page. "Add to Home Screen" gives it an icon.
 
 **Every scanned link is treated as hostile.** Anyone can make a link, so the viewer never renders HTML from it: text goes in as text nodes, only `http` and `https` links become clickable, every field is length-capped, decompression stops at 64 KB, and a strict Content-Security-Policy blocks inline scripts and any request to another site.
 
 ## Tests
 
 - **33 unit tests** (`node:test`): the encoding round trip at every chunk length, damaged and foreign links, a compression bomb, hand-made hostile payloads, links that hide the real site behind a login, input cleaning, print-size math, and a real QR decoder (jsQR) reading the generated code back to the exact link.
-- **A 39-check browser dry run, run twice** (`test/e2e.py`, Playwright): once in WebKit with the iPhone 15 profile and once in Edge on a phone-size screen, 78 checks in all. An owner builds a car, the sticker on screen is rasterised and decoded by jsQR, and the decoded link is opened on a second, fresh phone. It also checks script injection, damaged links, a 25-mod backup restore, which print sizes are switched off, printing, editing a copy on a new phone, page weight, and that nothing loads from another site or logs an error.
+- **A 39-check browser dry run, run three times** (`test/e2e.py`, Playwright): in WebKit with the iPhone 15 profile, in Chrome with the Android Pixel 7 profile, and in Edge on a phone-size screen, 117 checks in all. An owner builds a car, the sticker on screen is rasterised and decoded by jsQR, and the decoded link is opened on a second, fresh phone. It also checks script injection, damaged links, a 25-mod backup restore, which print sizes are switched off, printing, editing a copy on a new phone, page weight, and that nothing loads from another site or logs an error.
 
 ## Run it
 
@@ -57,7 +57,8 @@ One static page does both jobs: with a build after `#` it shows the build, witho
 npm install            # test-only dependencies: the QR encoder and decoder
 npm test               # unit tests
 python -m http.server 8765   # then open http://127.0.0.1:8765/
-npm run test:e2e       # browser dry run; needs Python with Playwright, its WebKit, and Edge or Chrome
+npm run test:e2e       # browser dry run; needs Python with Playwright, its WebKit, Chrome and Edge
+python tools/phone.py --adb <path to adb>   # open it on a paired Android phone, no public site
 ```
 
 ## Next
