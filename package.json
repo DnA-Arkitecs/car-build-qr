@@ -1,0 +1,17 @@
+{
+  "name": "car-build-qr",
+  "version": "0.1.0",
+  "private": true,
+  "description": "List a car's mods, print a QR sticker, and let anyone at a show scan it to see the full build. Static web app: no server, no database, no accounts.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "test:e2e": "python test/e2e.py",
+    "serve": "python -m http.server 8765"
+  },
+  "devDependencies": {
+    "jsqr": "1.4.0",
+    "qrcode-generator": "1.4.4"
+  }
+}
