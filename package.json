@@ -1,8 +1,8 @@
 {
   "name": "car-build-qr",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "List a car's mods, print a QR sticker, and let anyone at a show scan it to see the full build. Static web app: no server, no database, no accounts.",
+  "description": "List a car's mods, pick a style, print a QR sticker, and let anyone at a show scan it to see the full build. Static web app: no server, no database, no accounts.",
   "license": "UNLICENSED",
   "type": "module",
   "scripts": {

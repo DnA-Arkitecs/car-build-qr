@@ -1,6 +1,6 @@
 // The build: what an owner enters, cleaned the same way whether it comes from
 // the form, a backup file, or a link a stranger scanned.
-import { LIMITS, CATEGORIES, OTHER_CATEGORY } from './config.js';
+import { LIMITS, CATEGORIES, OTHER_CATEGORY, SPEC_KINDS, SCENE_IDS } from './config.js';
 
 // Control characters, direction overrides and non-characters. The zero-width
 // joiners (U+200C, U+200D) stay: emoji sequences and many scripts need them.
@@ -25,8 +25,12 @@ function dropLoneSurrogates(s) {
 }
 
 export function cleanText(value, max, { multiline = false } = {}) {
-  if (value === null || value === undefined) return '';
-  let s = dropLoneSurrogates(String(value)).replace(CONTROL, '');
+  // Only words and numbers count. Anything else a hand-made link carries (an
+  // array, an object with its own toString) becomes empty, never "[object
+  // Object]" and never a thrown error.
+  if (typeof value === 'number') value = Number.isFinite(value) ? String(value) : '';
+  if (typeof value !== 'string') return '';
+  let s = dropLoneSurrogates(value).replace(CONTROL, '');
   s = multiline ? s.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n') : s.replace(/[\r\n\t]+/g, ' ');
   s = s.trim();
   // Cut by code points so an emoji is never split in half.
@@ -69,6 +73,10 @@ export function emptyBuild() {
     owner: '',
     about: '',
     updated: '',
+    scene: SCENE_IDS[0],
+    specs: [],
+    specNote: '',
+    tags: [],
     mods: [],
   };
 }
@@ -107,8 +115,61 @@ export function normalizeBuild(raw) {
     owner: cleanText(b.owner, LIMITS.owner),
     about: cleanText(b.about, LIMITS.about, { multiline: true }),
     updated,
+    scene: cleanScene(b.scene),
+    specs: cleanSpecs(b.specs),
+    specNote: cleanText(b.specNote, LIMITS.specNote),
+    tags: cleanTags(b.tags),
     mods: mods.slice(0, LIMITS.mods * 2).map(normalizeMod).filter((m) => !modIsEmpty(m)).slice(0, LIMITS.mods),
   };
+}
+
+// A style id or its index in SCENES; anything else is the first style.
+export function cleanScene(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0 && value < SCENE_IDS.length) return SCENE_IDS[value];
+  return SCENE_IDS.includes(value) ? value : SCENE_IDS[0];
+}
+
+export function cleanSpecKind(value) {
+  const n = typeof value === 'number' ? value : SPEC_KINDS.findIndex((k) => k.name === value);
+  return Number.isInteger(n) && n >= 0 && n < SPEC_KINDS.length ? n : SPEC_KINDS.length - 1;
+}
+
+// Up to four numbers for the spec strip, each a kind and a short value.
+export function cleanSpecs(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, LIMITS.specs * 2)
+    .map((s) => (s && typeof s === 'object' ? { kind: cleanSpecKind(s.kind), value: cleanText(s.value, LIMITS.specValue) } : null))
+    .filter((s) => s && s.value)
+    .slice(0, LIMITS.specs);
+}
+
+// Tags from a list or from text split on commas; no repeats, no leading "#".
+export function cleanTags(value) {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,\n]/) : [];
+  const seen = new Set();
+  const out = [];
+  for (const t of raw.slice(0, LIMITS.tags * 4)) {
+    const tag = cleanText(typeof t === 'string' ? t : '', LIMITS.tag * 2).replace(/^#+/, '').trim();
+    const cut = Array.from(tag).slice(0, LIMITS.tag).join('').trim();
+    const key = cut.toLowerCase();
+    if (!cut || seen.has(key)) continue;
+    seen.add(key);
+    out.push(cut);
+    if (out.length === LIMITS.tags) break;
+  }
+  return out;
+}
+
+// The stamped "Build No." on the scan page and the share card: four digits
+// from the car itself (not the mods), so it stays the same as the list grows.
+export function buildNumber(b) {
+  const key = [b.type, b.year, b.make, b.model, b.trim, b.nickname, b.owner].join('|').toLowerCase();
+  let hash = 2166136261;
+  for (const ch of key) {
+    hash ^= ch.codePointAt(0);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return String(hash % 10000).padStart(4, '0');
 }
 
 export function vehicleLine(b) {

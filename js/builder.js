@@ -1,33 +1,20 @@
-// The owner's side: enter the vehicle, list the mods, get the QR to print.
-// Everything stays on the owner's device (browser storage plus a backup file);
-// nothing is sent anywhere.
-import { APP_NAME, TAGLINE, LIMITS, CATEGORIES } from './config.js';
-import { emptyBuild, normalizeBuild, normalizeMod, modIsEmpty, buildTitle, vehicleLine, todayISO } from './model.js';
+// The owner's side: enter the vehicle, pick a style, list the mods (or paste a
+// list), get the sticker to print and a story card to post. Everything stays
+// on the owner's device (browser storage plus a backup file); nothing is sent
+// anywhere.
+import { APP_NAME, TAGLINE, LIMITS, CATEGORIES, SPEC_KINDS, SCENES, sceneById } from './config.js';
+import { emptyBuild, normalizeBuild, normalizeMod, modIsEmpty, buildTitle, vehicleLine, todayISO, cleanTags, buildNumber } from './model.js';
 import { encodeBuild, shareUrl, compressionSupported } from './codec.js';
-import { gradeLink, moduleMatrix } from './qr.js';
-import { stickerSvg, dashCardSvg } from './sticker.js';
+import { gradeLink, moduleMatrix, loadQrLib, SHAPES } from './qr.js';
+import { shapeSvg, fontsUsed } from './sticker.js';
+import { withFonts, svgToPngBlob } from './exportfile.js';
+import { storyCardBlob } from './storycard.js';
+import { parseModList } from './paste.js';
+import { loadSaved, saveLocal, loadShape, saveShape } from './storage.js';
 import { h, clear, svgNode } from './elements.js';
-import { shareBase, saveFile, printPage, copyText } from './platform.js';
+import { shareBase, saveFile, printPage, copyText, inApp } from './platform.js';
 
-export const STORAGE_KEY = 'buildtag.build.v1';
-
-export function loadSaved() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? normalizeBuild(JSON.parse(raw)) : null;
-  } catch {
-    return null;
-  }
-}
-
-export function saveLocal(build) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(build));
-    return true;
-  } catch {
-    return false;
-  }
-}
+export { STORAGE_KEY, loadSaved, saveLocal } from './storage.js';
 
 const GRADE_TEXT = {
   easy: (g) => `Easy to scan on a ${g.sticker.inches}-inch sticker or bigger.`,
@@ -35,6 +22,12 @@ const GRADE_TEXT = {
   card: () => 'Too dense for a sticker. Print the dash card (letter paper) for your dashboard, or shorten notes and links to fit a sticker.',
   'too-big': () => 'Too much for one code. Shorten notes, remove some links, or split the list.',
 };
+
+function shapeText(shape, f) {
+  if (shape === 'card') return 'The dash card: letter paper for the dashboard, easy to scan from a few steps away.';
+  if (shape === 'square') return null; // GRADE_TEXT covers it
+  return f.easy ? `Easy to scan on the ${f.label} or bigger.` : `Fits the ${f.label}; people scan it from close up.`;
+}
 
 function field(label, input, hint) {
   return h('label', { class: 'field' }, h('span', { class: 'label' }, label), input, hint && h('span', { class: 'hint' }, hint));
@@ -58,26 +51,8 @@ function slug(s) {
   return (s || 'build').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'build';
 }
 
-async function svgToPngBlob(svgMarkup, px) {
-  const img = new Image();
-  const url = URL.createObjectURL(new Blob([svgMarkup], { type: 'image/svg+xml' }));
-  try {
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-      img.src = url;
-    });
-    const canvas = document.createElement('canvas');
-    canvas.width = px;
-    canvas.height = px;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0, 0, px, px);
-    ctx.drawImage(img, 0, 0, px, px);
-    return await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+function modName(m) {
+  return [m.brand, m.part].filter(Boolean).join(' ') || m.partNumber;
 }
 
 // root: element to fill. baseUrl: the page's own address (the QR points here).
@@ -85,11 +60,16 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
   let build = normalizeBuild(initial || loadSaved() || emptyBuild());
   let editing = -1; // index of the mod being edited, -1 when adding
   let current = { url: '', grade: null };
+  let chosenShape = SHAPES.some((s) => s.id === loadShape()) ? loadShape() : 'square';
   let timer = null;
+  let storyTimer = null;
   let runId = 0;
+  let storyId = 0;
+  let story = { blob: null, url: '' };
+  let pasted = null;
 
   clear(root);
-  document.title = `${APP_NAME} · Make your build sheet`;
+  document.title = `${APP_NAME} · Make your build tag`;
 
   // ---------- vehicle ----------
   const typeCar = h('input', { type: 'radio', name: 'type', value: 'car', checked: build.type !== 'moto' });
@@ -103,6 +83,25 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     owner: textInput('owner', build.owner, { max: LIMITS.owner, placeholder: 'Optional, e.g. your Instagram' }),
     about: h('textarea', { name: 'about', maxLength: LIMITS.about, rows: 3, placeholder: 'Optional: a line about the build' }, build.about),
   };
+
+  // ---------- style and specs ----------
+  const sceneInputs = SCENES.map((s) => h('input', { type: 'radio', name: 'scene', value: s.id, checked: build.scene === s.id }));
+  const sceneChips = h('div', { class: 'scene-chips', role: 'radiogroup', 'aria-label': 'Style' },
+    SCENES.map((s, i) => h('label', { class: 'scene-chip' },
+      sceneInputs[i],
+      h('span', { class: 'swatch', dataset: { scene: s.id }, 'aria-hidden': 'true' }),
+      h('span', { class: 'scene-name' }, s.name),
+      h('span', { class: 'hint' }, s.blurb),
+    )),
+  );
+  const specRows = [0, 1, 2, 3].map((i) => {
+    const kind = h('select', { name: `specKind${i}`, 'aria-label': `Spec ${i + 1}` }, SPEC_KINDS.map((k, j) => h('option', { value: String(j) }, k.name)));
+    const value = textInput(`specValue${i}`, '', { max: LIMITS.specValue });
+    kind.addEventListener('change', () => { value.placeholder = SPEC_KINDS[Number(kind.value)].example || 'Value'; });
+    return { kind, value };
+  });
+  const specNote = textInput('specNote', build.specNote, { max: LIMITS.specNote, placeholder: 'Optional, e.g. Dynojet, 93 octane' });
+  const tagsInput = textInput('tags', build.tags.join(', '), { max: LIMITS.tags * (LIMITS.tag + 2), placeholder: 'Daily, Stage 2, Track' });
 
   // ---------- mod form ----------
   const f = {
@@ -135,7 +134,25 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
   const modList = h('ol', { class: 'mod-list' });
   const modCount = h('span', { class: 'count' });
 
+  // ---------- paste a list ----------
+  const pasteBox = h('textarea', { name: 'paste', rows: 7, maxLength: LIMITS.paste, placeholder: 'Mods:\n- Cobb Accessport V3 - Stage 2 tune\n- Invidia Q300 cat-back (HS15SSTGTC)\n- BC Racing BR coilovers\n450whp / 400wtq' });
+  const pasteResult = h('div', { class: 'paste-result', 'aria-live': 'polite' });
+  const pastePanel = h('div', { class: 'paste-panel', hidden: true },
+    field('Paste your mod list', pasteBox, 'From an Instagram caption, your notes or a forum post. One mod per line, or separated by commas. You will see every mod before it is added.'),
+    h('div', { class: 'row' },
+      h('button', { type: 'button', class: 'button', onClick: onReadPaste }, 'Read my list'),
+      h('button', { type: 'button', class: 'button ghost', onClick: closePaste }, 'Close'),
+    ),
+    pasteResult,
+  );
+  const pasteToggle = h('button', { type: 'button', class: 'button paste-toggle', onClick: openPaste }, 'Paste a list');
+
   // ---------- sticker ----------
+  const shapeInputs = SHAPES.map((s) => h('input', { type: 'radio', name: 'shape', value: s.id, checked: s.id === chosenShape }));
+  const shapeHint = h('p', { class: 'hint shape-hint' });
+  const shapeChips = h('div', { class: 'shape-chips', role: 'radiogroup', 'aria-label': 'Sticker shape' },
+    SHAPES.map((s, i) => h('label', { class: 'shape-chip', dataset: { shape: s.id } }, shapeInputs[i], h('span', null, s.name))),
+  );
   const meter = h('p', { class: 'meter', 'aria-live': 'polite' });
   const preview = h('div', { class: 'sticker-preview' });
   const printArea = h('div', { class: 'print-area', 'aria-hidden': 'true' });
@@ -148,14 +165,31 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
   };
   const printButtons = h('div', { class: 'actions print-buttons' });
 
+  // ---------- story card ----------
+  const storyImg = h('img', { class: 'story-preview', alt: 'Story card preview', width: 270, height: 480, hidden: true });
+  const storyNote = h('p', { class: 'hint story-note' }, 'The card appears once your QR is ready.');
+  const canShareFiles = !inApp() && typeof navigator !== 'undefined' && typeof navigator.canShare === 'function'
+    && (() => {
+      try {
+        return navigator.canShare({ files: [new File([new Uint8Array(1)], 'x.png', { type: 'image/png' })] });
+      } catch {
+        return false;
+      }
+    })();
+  const storyActions = {
+    share: h('button', { type: 'button', class: 'button primary', hidden: !canShareFiles, onClick: onShareStory }, 'Share to a story'),
+    save: h('button', { type: 'button', class: 'button', onClick: onDownloadStory }, 'Download story card'),
+  };
+
   // ---------- backup ----------
   const fileInput = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onChange: onImport });
 
   root.appendChild(h('div', { class: 'builder' },
+    h('div', { class: 'stripe', 'aria-hidden': 'true' }),
     h('header', { class: 'top' },
       h('h1', null, APP_NAME),
       h('p', { class: 'tagline' }, TAGLINE),
-      h('p', { class: 'hint' }, 'List your mods, print the QR, stick it on. At a show, anyone who scans it sees your full build in their phone\'s browser. No app, no account.'),
+      h('p', { class: 'hint' }, 'List your mods, pick a style, print the QR, stick it on. At a show, anyone who scans it sees your full build in their phone\'s browser. No app, no account.'),
     ),
     !compressionSupported() && h('p', { class: 'error', role: 'alert' }, 'This browser is too old to make a QR code. Try an up-to-date Chrome, Safari, Edge or Firefox.'),
 
@@ -173,14 +207,29 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
       field('About', v.about),
     ),
 
+    h('section', { class: 'card', 'aria-labelledby': 'h-style' },
+      h('h2', { id: 'h-style' }, '2. Style and specs'),
+      h('p', { class: 'hint' }, 'The style sets the look of your scan page, sticker and story card.'),
+      sceneChips,
+      h('h3', null, 'Spec strip'),
+      h('p', { class: 'hint' }, 'Up to four numbers shown big at the top of your page. Leave a box empty to skip it.'),
+      h('div', { class: 'spec-rows' }, specRows.map((r) => h('div', { class: 'spec-row' }, r.kind, r.value))),
+      field('Where the numbers come from', specNote),
+      field('Tags', tagsInput, 'Up to six, separated by commas.'),
+    ),
+
     h('section', { class: 'card', 'aria-labelledby': 'h-mods' },
-      h('h2', { id: 'h-mods' }, '2. Your mods ', modCount),
+      h('h2', { id: 'h-mods' }, '3. Your mods ', modCount),
       modList,
+      h('div', { class: 'row paste-row' }, pasteToggle),
+      pastePanel,
       modForm,
     ),
 
     h('section', { class: 'card', 'aria-labelledby': 'h-qr' },
-      h('h2', { id: 'h-qr' }, '3. Your QR sticker'),
+      h('h2', { id: 'h-qr' }, '4. Your sticker'),
+      shapeChips,
+      shapeHint,
       meter,
       preview,
       h('div', { class: 'actions' }, Object.values(actions)),
@@ -188,6 +237,14 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
       printButtons,
       h('p', { class: 'hint' }, 'Weatherproof vinyl label sheets work for the car; plain paper works for the dash card. Print at 100% size, not "fit to page".'),
       h('p', { class: 'hint' }, 'Added a mod later? Come back, update the list and print a new QR. A printed sticker keeps the list it was made with.'),
+    ),
+
+    h('section', { class: 'card', 'aria-labelledby': 'h-story' },
+      h('h2', { id: 'h-story' }, '5. Story card'),
+      h('p', { class: 'hint' }, 'A picture of your build for an Instagram or TikTok story, with the QR on it. Put the link in your caption too.'),
+      storyNote,
+      storyImg,
+      h('div', { class: 'actions' }, Object.values(storyActions)),
     ),
 
     h('section', { class: 'card small', 'aria-labelledby': 'h-backup' },
@@ -205,9 +262,20 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
   ));
 
   // ---------- behaviour ----------
-  for (const input of [...Object.values(v), typeCar, typeMoto]) {
+  const watched = [...Object.values(v), typeCar, typeMoto, ...sceneInputs, specNote, tagsInput,
+    ...specRows.flatMap((r) => [r.kind, r.value])];
+  for (const input of watched) {
     input.addEventListener('input', onVehicleChange);
     input.addEventListener('change', onVehicleChange);
+  }
+  shapeInputs.forEach((input) => input.addEventListener('change', () => {
+    chosenShape = input.value;
+    saveShape(chosenShape);
+    showSticker();
+  }));
+
+  function readSpecs() {
+    return specRows.map((r) => ({ kind: Number(r.kind.value), value: r.value.value }));
   }
 
   function onVehicleChange() {
@@ -216,8 +284,21 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
       type: typeMoto.checked ? 'moto' : 'car',
       year: v.year.value, make: v.make.value, model: v.model.value, trim: v.trim.value,
       nickname: v.nickname.value, owner: v.owner.value, about: v.about.value,
+      scene: (sceneInputs.find((i) => i.checked) || sceneInputs[0]).value,
+      specs: readSpecs(),
+      specNote: specNote.value,
+      tags: cleanTags(tagsInput.value),
     });
     changed();
+  }
+
+  function fillSpecs() {
+    specRows.forEach((r, i) => {
+      const s = build.specs[i];
+      r.kind.value = String(s ? s.kind : i);
+      r.value.value = s ? s.value : '';
+      r.value.placeholder = SPEC_KINDS[Number(r.kind.value)].example || 'Value';
+    });
   }
 
   function readForm() {
@@ -292,8 +373,7 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
   }
 
   function remove(i) {
-    const m = build.mods[i];
-    const name = [m.brand, m.part].filter(Boolean).join(' ') || m.partNumber;
+    const name = modName(build.mods[i]);
     if (!confirm(`Remove "${name}"?`)) return;
     build = { ...build, mods: build.mods.filter((_, k) => k !== i) };
     if (editing === i) resetForm();
@@ -306,11 +386,11 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     clear(modList);
     modCount.textContent = build.mods.length ? String(build.mods.length) : '';
     if (!build.mods.length) {
-      modList.appendChild(h('li', { class: 'empty' }, 'No mods yet. Add your first one below.'));
+      modList.appendChild(h('li', { class: 'empty' }, 'No mods yet. Add your first one below, or paste a list you already have.'));
       return;
     }
     build.mods.forEach((m, i) => {
-      const name = [m.brand, m.part].filter(Boolean).join(' ') || m.partNumber;
+      const name = modName(m);
       modList.appendChild(h('li', { class: 'mod-row' },
         h('div', { class: 'mod-text' },
           h('span', { class: 'cat' }, CATEGORIES[m.category]),
@@ -327,6 +407,58 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     });
   }
 
+  // ---------- paste ----------
+  function openPaste() {
+    pastePanel.hidden = false;
+    pasteToggle.hidden = true;
+    pasteBox.focus();
+  }
+
+  function closePaste() {
+    pastePanel.hidden = true;
+    pasteToggle.hidden = false;
+    pasteBox.value = '';
+    pasted = null;
+    clear(pasteResult);
+  }
+
+  function onReadPaste() {
+    pasted = parseModList(pasteBox.value);
+    clear(pasteResult);
+    const room = LIMITS.mods - build.mods.length;
+    const take = pasted.mods.slice(0, Math.max(0, room));
+    if (!pasted.mods.length && !pasted.specs.length) {
+      pasteResult.appendChild(h('p', { class: 'form-error' }, 'No mods found in that text. Put one mod per line, like "Invidia Q300 cat-back".'));
+      return;
+    }
+    const specsText = pasted.specs.map((s) => `${SPEC_KINDS[s.kind].name} ${s.value}`).join(', ');
+    pasteResult.appendChild(h('div', null,
+      h('p', { class: 'label' }, `Found ${pasted.mods.length} ${pasted.mods.length === 1 ? 'mod' : 'mods'}${specsText ? ` and specs: ${specsText}` : ''}`),
+      take.length > 0 && h('ol', { class: 'paste-preview' }, take.map((m) => h('li', null,
+        h('span', { class: 'cat' }, CATEGORIES[m.category]),
+        h('span', { class: 'name' }, modName(m)),
+        m.partNumber && (m.brand || m.part) && h('span', { class: 'pn' }, m.partNumber),
+      ))),
+      pasted.mods.length > take.length && h('p', { class: 'form-error' }, `Only ${take.length} fit: a build holds up to ${LIMITS.mods} mods.`),
+      h('p', { class: 'hint' }, 'Categories are a best guess. Tap Edit on any mod afterwards to fix it.'),
+      h('div', { class: 'row' },
+        h('button', { type: 'button', class: 'button primary', onClick: () => addPasted(take) },
+          take.length ? `Add ${take.length} ${take.length === 1 ? 'mod' : 'mods'}` : 'Add the specs'),
+      ),
+    ));
+  }
+
+  function addPasted(take) {
+    const specs = build.specs.slice();
+    for (const s of pasted ? pasted.specs : []) {
+      if (specs.length < LIMITS.specs && !specs.some((x) => x.kind === s.kind)) specs.push(s);
+    }
+    build = normalizeBuild({ ...build, mods: [...build.mods, ...take], specs });
+    closePaste();
+    fill();
+  }
+
+  // ---------- QR and sticker ----------
   function changed() {
     const ok = saveLocal(build);
     saveNote.textContent = ok ? '' : 'This browser is not saving (private mode?). Save a backup file before you close the page.';
@@ -334,12 +466,17 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     timer = setTimeout(refreshQr, 250);
   }
 
+  // The QR and every word printed beside it come from the same snapshot of the
+  // build, so a sticker never carries new text over an old code.
   async function refreshQr() {
     const id = ++runId;
-    const stamped = { ...build, updated: todayISO() };
+    timer = null;
+    const snap = build; // edits replace the build, never change it in place
+    const stamped = { ...snap, updated: todayISO() };
     let url;
     let localUrl;
     try {
+      await loadQrLib();
       const payload = await encodeBuild(stamped);
       url = shareUrl(shareBase(baseUrl), payload); // what the QR and "Copy link" carry
       localUrl = shareUrl(baseUrl, payload); // the preview opens here, also inside the app
@@ -351,34 +488,95 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
       return;
     }
     if (id !== runId) return; // a newer edit already started
-    if (url === current.url) return; // nothing changed: keep the buttons the owner may be tapping
+    if (url === current.url && snap.scene === current.scene) return; // nothing changed: keep the buttons the owner may be tapping
     const grade = gradeLink(url);
-    current = { url, grade, title: buildTitle(build), matrix: grade.ok ? moduleMatrix(grade.qr) : null };
+    current = {
+      url, localUrl, grade, build: snap, scene: snap.scene, title: buildTitle(snap), matrix: grade.ok ? moduleMatrix(grade.qr) : null,
+    };
+    showSticker();
+    clearTimeout(storyTimer);
+    storyTimer = setTimeout(refreshStory, 300);
+  }
+
+  // The shape shown: the owner's pick when it scans, else the first that does.
+  function effectiveShape() {
+    const shapes = current.grade.shapes || {};
+    if (shapes[chosenShape]) return chosenShape;
+    const fallback = SHAPES.find((s) => shapes[s.id]);
+    return fallback ? fallback.id : null;
+  }
+
+  function stickerOpts(inches) {
+    const b = current.build;
+    return {
+      title: current.title,
+      subtitle: b.nickname ? vehicleLine(b) : '',
+      count: b.mods.length,
+      specs: b.specs.map((s) => ({ label: SPEC_KINDS[s.kind].name, value: s.value })),
+      serial: buildNumber(b),
+      scene: sceneById(b.scene),
+      inches,
+    };
+  }
+
+  // Before a download, copy or share: finish any edit still waiting to be
+  // turned into a QR, then say whether there is one to use.
+  async function ready() {
+    if (timer) {
+      clearTimeout(timer);
+      await refreshQr();
+    }
+    return Boolean(current.grade && current.grade.ok && current.matrix);
+  }
+
+  function showSticker() {
+    const { grade } = current;
     clear(preview);
     clear(printButtons);
+    if (!grade) return;
+    const shapes = grade.shapes || {};
+    shapeInputs.forEach((input) => {
+      const fits = Boolean(shapes[input.value]);
+      input.disabled = !fits;
+      input.parentElement.classList.toggle('off', !fits);
+      input.checked = input.value === chosenShape;
+    });
     if (!grade.ok) {
       meter.textContent = GRADE_TEXT['too-big'](grade);
       meter.className = 'meter bad';
+      shapeHint.textContent = '';
       setActions(false);
       return;
     }
-    meter.textContent = GRADE_TEXT[grade.level](grade);
-    meter.className = `meter ${grade.level}`;
-    preview.classList.toggle('card-preview', !grade.sticker);
-    preview.appendChild(svgNode(grade.sticker ? currentSvg(null) : currentCard(false)));
-    actions.open.href = localUrl;
+    const shape = effectiveShape();
+    const fmt = shapes[shape];
+    const info = SHAPES.find((s) => s.id === shape);
+    const chosen = SHAPES.find((s) => s.id === chosenShape);
+    shapeHint.textContent = shape === chosenShape
+      ? info.hint
+      : `Too many mods for the ${chosen.name.toLowerCase()} to scan. Showing the ${info.name.toLowerCase()} instead.`;
+    if (shape === 'square') {
+      meter.textContent = GRADE_TEXT[grade.level](grade);
+      meter.className = `meter ${grade.level}`;
+    } else {
+      meter.textContent = shape === 'card' && !grade.sticker ? GRADE_TEXT.card(grade) : shapeText(shape, fmt);
+      meter.className = `meter ${fmt.easy ? 'easy' : 'good'}`;
+    }
+    preview.className = `sticker-preview shape-${shape}`;
+    preview.appendChild(svgNode(shapeSvg(shape, current.matrix, stickerOpts(null))));
+    actions.open.href = current.localUrl;
     setActions(true);
-    actions.svg.textContent = grade.sticker ? 'Download SVG (for a sticker printer)' : 'Download dash card SVG';
-    actions.png.disabled = !grade.sticker;
-    for (const f of grade.formats) {
-      const text = f.kind === 'card' ? 'Print dash card' : `Print ${f.inches}-inch sheet (${f.perSheet})`;
+    actions.svg.textContent = shape === 'card' ? 'Download dash card SVG' : 'Download SVG (for a sticker printer)';
+    const list = grade.formats.filter((x) => x.shape === shape || x.kind === 'card');
+    for (const x of list) {
+      const text = x.kind === 'card' ? 'Print dash card' : `Print ${x.label} sheet (${x.perSheet})`;
       printButtons.appendChild(h('button', {
         type: 'button',
         class: 'button',
-        disabled: !f.fits,
-        title: f.fits ? null : 'Too dense to scan at this size',
-        dataset: { format: f.id },
-        onClick: () => onPrint(f),
+        disabled: !x.fits,
+        title: x.fits ? null : 'Too dense to scan at this size',
+        dataset: { format: x.id },
+        onClick: () => onPrint(x),
       }, text));
     }
   }
@@ -393,23 +591,23 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
         el.disabled = !enabled;
       }
     }
+    for (const el of Object.values(storyActions)) el.disabled = !enabled;
   }
 
-  function currentSvg(inches) {
-    return stickerSvg(current.matrix, { title: current.title, inches });
+  function svgFor(fmt) {
+    return shapeSvg(fmt.shape, current.matrix, stickerOpts(fmt.kind === 'card' ? true : fmt.w));
   }
 
-  function currentCard(inches = true) {
-    return dashCardSvg(current.matrix, {
-      title: current.title,
-      subtitle: build.nickname ? vehicleLine(build) : '',
-      count: build.mods.length,
-      inches,
-    });
+  // The size a download is made at: the largest of the shape's sizes that scans.
+  function downloadFormat() {
+    const shape = effectiveShape();
+    const fits = current.grade.formats.filter((x) => x.shape === shape && x.fits);
+    return fits[fits.length - 1];
   }
 
   async function onCopyLink(e) {
     const button = e.currentTarget;
+    if (!(await ready())) return;
     try {
       await copyText(current.url);
       button.textContent = 'Link copied';
@@ -419,37 +617,124 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     setTimeout(() => { button.textContent = 'Copy link'; }, 1500);
   }
 
-  function onDownloadSvg() {
-    const { sticker } = current.grade;
-    if (sticker) {
-      const inches = Math.max(sticker.inches, 3);
-      download(`${slug(current.title)}-qr-sticker.svg`, new Blob([currentSvg(inches)], { type: 'image/svg+xml' }));
-    } else {
-      download(`${slug(current.title)}-dash-card.svg`, new Blob([currentCard()], { type: 'image/svg+xml' }));
+  // The SVG with its fonts inside; if the font files cannot be read, the plain
+  // SVG (it falls back to the phone's own fonts).
+  async function svgWithFonts(fmt) {
+    const plain = svgFor(fmt);
+    try {
+      return { svg: await withFonts(plain, fontsUsed(current.scene)), plain };
+    } catch {
+      return { svg: plain, plain };
     }
   }
 
+  function fileName(fmt, ext) {
+    const name = fmt.kind === 'card' ? 'dash-card' : `qr-${fmt.shape === 'square' ? 'sticker' : fmt.shape}`;
+    return `${slug(current.title)}-${name}.${ext}`;
+  }
+
+  async function onDownloadSvg() {
+    if (!(await ready())) return;
+    const fmt = downloadFormat();
+    if (!fmt) return;
+    const { svg } = await svgWithFonts(fmt);
+    download(fileName(fmt, 'svg'), new Blob([svg], { type: 'image/svg+xml' }));
+  }
+
   async function onDownloadPng() {
-    const blob = await svgToPngBlob(currentSvg(4), 1200); // 4 inches at 300 dpi
-    if (blob) download(`${slug(current.title)}-qr-sticker.png`, blob);
+    if (!(await ready())) return;
+    const fmt = downloadFormat();
+    if (!fmt) return;
+    const dpi = fmt.kind === 'card' ? 150 : 300; // a letter-size card at 300 dpi is a very large picture for a phone
+    const w = Math.round(fmt.w * dpi);
+    const h = Math.round(fmt.h * dpi);
+    const { svg, plain } = await svgWithFonts(fmt);
+    let blob = null;
+    try {
+      blob = await svgToPngBlob(svg, w, h);
+    } catch {
+      blob = null;
+    }
+    if (!blob && svg !== plain) {
+      try {
+        blob = await svgToPngBlob(plain, w, h); // a browser that refuses the embedded fonts
+      } catch {
+        blob = null;
+      }
+    }
+    if (blob) download(fileName(fmt, 'png'), blob);
+    else alert('This browser could not make the picture. Download the SVG instead.');
   }
 
   // The sheet stays in the (hidden) print area after printing. Print styles show
   // only the sheet whenever it holds one, so nothing depends on a timer: on an
   // iPhone, window.print() returns before the print sheet is drawn.
   function onPrint(format) {
-    if (!format.fits) return;
+    if (!format.fits || !current.matrix) return;
     clear(printArea);
     printArea.classList.toggle('is-card', format.kind === 'card');
-    // Letter paper with half-inch margins: 3 across at 2 inches, 2 at 3, 1 at 4.
-    printArea.style.setProperty('--sticker', format.kind === 'card' ? '7.5in' : `${format.inches}in`);
+    printArea.dataset.shape = format.shape;
+    // Letter paper with half-inch margins: the format says how many fit across.
+    printArea.style.setProperty('--sticker-w', `${format.w}in`);
+    printArea.style.setProperty('--sticker-h', `${format.h}in`);
     printArea.style.setProperty('--cols', String(format.cols));
-    for (let i = 0; i < format.perSheet; i++) {
-      printArea.appendChild(svgNode(format.kind === 'card' ? currentCard() : currentSvg(format.inches)));
-    }
+    for (let i = 0; i < format.perSheet; i++) printArea.appendChild(svgNode(svgFor(format)));
     printPage();
   }
 
+  // ---------- story card ----------
+  async function refreshStory() {
+    const id = ++storyId;
+    if (!current.matrix) return;
+    const { build: snap, matrix, url: forUrl } = current;
+    let blob;
+    try {
+      blob = await storyCardBlob(snap, matrix);
+    } catch {
+      blob = null;
+    }
+    if (id !== storyId) return;
+    if (!blob) {
+      storyNote.textContent = 'This browser could not draw the story card.';
+      return;
+    }
+    if (story.url) URL.revokeObjectURL(story.url);
+    story = { blob, url: URL.createObjectURL(blob), forUrl };
+    storyImg.src = story.url;
+    storyImg.hidden = false;
+    storyNote.textContent = '';
+  }
+
+  function storyFile() {
+    return new File([story.blob], `${slug(current.title)}-story.png`, { type: 'image/png' });
+  }
+
+  // The card for the build as it is now: drawn on the spot if the last one is
+  // missing or older than the QR.
+  async function storyReady() {
+    if (!(await ready())) return false;
+    if (!story.blob || story.forUrl !== current.url) {
+      clearTimeout(storyTimer);
+      await refreshStory();
+    }
+    return Boolean(story.blob && story.forUrl === current.url);
+  }
+
+  async function onShareStory() {
+    if (!(await storyReady())) return;
+    try {
+      await navigator.share({ files: [storyFile()], title: current.title });
+    } catch (e) {
+      if (e && e.name === 'AbortError') return; // the owner closed the share sheet
+      download(storyFile().name, story.blob);
+    }
+  }
+
+  async function onDownloadStory() {
+    if (await storyReady()) download(storyFile().name, story.blob);
+  }
+
+  // ---------- backup ----------
   function onExport() {
     const data = { app: APP_NAME, format: 1, saved: new Date().toISOString(), build };
     download(`${slug(buildTitle(build))}-backup.json`, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
@@ -484,12 +769,31 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     typeCar.checked = build.type !== 'moto';
     typeMoto.checked = build.type === 'moto';
     for (const key of Object.keys(v)) v[key].value = build[key];
+    sceneInputs.forEach((i) => { i.checked = i.value === build.scene; });
+    fillSpecs();
+    specNote.value = build.specNote;
+    tagsInput.value = build.tags.join(', ');
     resetForm();
     renderMods();
     changed();
   }
 
+  fillSpecs();
   renderMods();
+  setActions(false); // nothing to copy, download or share until the first QR is made
   changed();
-  return { getBuild: () => build, getUrl: () => current.url };
+  return {
+    getBuild: () => build,
+    getUrl: () => current.url,
+    // The page moved on (a link opened): stop the timers and drop the card.
+    destroy() {
+      runId++;
+      storyId++;
+      clearTimeout(timer);
+      clearTimeout(storyTimer);
+      timer = null;
+      if (story.url) URL.revokeObjectURL(story.url);
+      story = { blob: null, url: '' };
+    },
+  };
 }

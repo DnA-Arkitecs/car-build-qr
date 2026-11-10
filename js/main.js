@@ -1,13 +1,15 @@
 // One page, two modes: a link with a build after "#" shows the build (what a
-// scan opens); no build in the link shows the owner's editor.
+// scan opens); no build in the link shows the owner's editor. The editor and
+// the QR maker load only in editor mode, so a scan opens fast on a phone.
 import { decodeBuild, PayloadError } from './codec.js';
-import { renderViewer, renderViewerError } from './viewer.js';
-import { renderBuilder, loadSaved, saveLocal } from './builder.js';
+import { renderViewer, renderViewerError, applyScene } from './viewer.js';
+import { loadSaved, saveLocal } from './storage.js';
 import { buildTitle } from './model.js';
 import { h, clear } from './elements.js';
 
 const root = document.getElementById('app');
 let routeId = 0;
+let editor = null; // the open editor, stopped when the page shows something else
 
 function baseUrl() {
   const u = new URL(window.location.href);
@@ -18,10 +20,24 @@ function baseUrl() {
 
 async function route() {
   const id = ++routeId;
+  if (editor) {
+    editor.destroy();
+    editor = null;
+  }
   const payload = window.location.hash.slice(1);
   document.body.classList.toggle('mode-view', Boolean(payload));
   if (!payload) {
-    renderBuilder(root, { baseUrl: baseUrl() });
+    applyScene(null);
+    let builder;
+    try {
+      builder = await import('./builder.js');
+    } catch {
+      if (id !== routeId) return;
+      clear(root).appendChild(h('p', { class: 'error', role: 'alert' }, 'The editor did not load. Check the connection and reload the page.'));
+      return;
+    }
+    if (id !== routeId) return;
+    editor = builder.renderBuilder(root, { baseUrl: baseUrl() });
     return;
   }
   let build;

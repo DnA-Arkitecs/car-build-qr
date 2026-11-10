@@ -25,7 +25,7 @@ ASSETS = ANDROID / "app" / "src" / "main" / "assets" / "web"
 APK_OUT = ANDROID / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
 DIST = ROOT / "dist" / "BuildTag-debug.apk"
 PACKAGE = "io.github.dnaarkitecs.buildtag"
-WEB_FILES = ["index.html", "icon.svg", "icon-180.png", "css", "js", "vendor/qrcode.js"]
+WEB_FILES = ["index.html", "icon.svg", "icon-180.png", "css", "js", "fonts", "vendor/qrcode.js"]
 
 
 def copy_page():

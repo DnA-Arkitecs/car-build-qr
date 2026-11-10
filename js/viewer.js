@@ -1,7 +1,8 @@
-// What someone sees after scanning a sticker: the car and every mod, grouped,
-// with the part numbers easy to copy and a link to find each part.
-import { APP_NAME } from './config.js';
-import { buildTitle, vehicleLine, groupMods } from './model.js';
+// What someone sees after scanning a sticker: the car in its owner's style
+// (tech card, night meet, build sheet, trail), the spec strip, and every mod,
+// grouped, with the part numbers easy to copy and a link to find each part.
+import { APP_NAME, CATEGORY_CODES, SPEC_KINDS, sceneById } from './config.js';
+import { buildTitle, vehicleLine, groupMods, buildNumber } from './model.js';
 import { h, clear } from './elements.js';
 import { copyText as copyToClipboard } from './platform.js';
 
@@ -58,35 +59,64 @@ function modCard(mod) {
   );
 }
 
+function specStrip(build) {
+  if (!build.specs.length) return null;
+  return h('dl', { class: 'spec-strip', dataset: { n: String(build.specs.length) } },
+    build.specs.map((s) => h('div', { class: 'spec' },
+      h('dt', null, SPEC_KINDS[s.kind].name),
+      h('dd', null, s.value),
+    )),
+  );
+}
+
+// Sets the page's colours to the build's style (the stylesheet holds them).
+export function applyScene(sceneId) {
+  if (sceneId) document.body.dataset.scene = sceneById(sceneId).id;
+  else delete document.body.dataset.scene;
+}
+
 // root: element to fill. opts.homeHref: link to make your own. opts.onEditCopy: optional.
 export function renderViewer(root, build, opts = {}) {
   clear(root);
+  const scene = sceneById(build.scene);
+  applyScene(scene.id);
   const title = buildTitle(build);
   const line = vehicleLine(build);
   const groups = groupMods(build.mods);
   const count = build.mods.length;
   document.title = `${title} · ${APP_NAME}`;
 
-  root.appendChild(h('article', { class: 'viewer' },
+  root.appendChild(h('article', { class: 'viewer', dataset: { scene: scene.id } },
+    h('div', { class: 'stripe', 'aria-hidden': 'true' }),
     h('header', { class: 'hero' },
-      h('p', { class: 'kicker' }, build.type === 'moto' ? 'Bike build' : 'Car build'),
+      h('div', { class: 'stamp-row' },
+        h('p', { class: 'kicker' }, build.type === 'moto' ? 'Bike build' : 'Car build'),
+        h('p', { class: 'serial' }, `Build No. ${buildNumber(build)}`),
+      ),
       h('h1', { id: 'build-title' }, title),
       build.nickname && line && h('p', { class: 'vehicle' }, line),
       build.owner && h('p', { class: 'owner' }, `Owner: ${build.owner}`),
-      h('p', { class: 'meta' },
-        `${count} ${count === 1 ? 'mod' : 'mods'}`,
-        build.updated && ` · Updated ${formatDate(build.updated)}`,
-      ),
+      build.tags.length > 0 && h('ul', { class: 'pills', 'aria-label': 'Tags' }, build.tags.map((t) => h('li', null, t))),
     ),
+    specStrip(build),
+    build.specNote && h('p', { class: 'spec-note' }, build.specNote),
     build.about && h('p', { class: 'about' }, build.about),
+    h('p', { class: 'meta' },
+      `${count} ${count === 1 ? 'mod' : 'mods'}`,
+      build.updated && ` · Updated ${formatDate(build.updated)}`,
+    ),
     count === 0 && h('p', { class: 'empty' }, 'No mods listed yet.'),
     groups.map((g) => h('section', { class: 'group' },
-      h('h2', null, g.name, h('span', { class: 'count' }, String(g.items.length))),
+      h('h2', null,
+        h('span', { class: 'code', 'aria-hidden': 'true' }, CATEGORY_CODES[g.category]),
+        g.name,
+        h('span', { class: 'count' }, String(g.items.length)),
+      ),
       h('ul', { class: 'mods' }, g.items.map(modCard)),
     )),
     h('footer', { class: 'viewer-foot' },
-      h('p', null, 'Parts and notes are listed by the owner.'),
-      h('a', { class: 'button primary', href: opts.homeHref || './' }, 'Make a build sheet for your car'),
+      h('p', null, 'Parts and notes are listed by the owner. No plate, VIN or location shown.'),
+      h('a', { class: 'button primary', href: opts.homeHref || './' }, 'Make a tag for your car'),
       opts.onEditCopy && h('button', { type: 'button', class: 'button ghost', onClick: opts.onEditCopy }, 'This is my car: edit a copy'),
     ),
   ));
@@ -94,15 +124,17 @@ export function renderViewer(root, build, opts = {}) {
 
 export function renderViewerError(root, message, homeHref) {
   clear(root);
+  applyScene('tech');
   document.title = APP_NAME;
-  root.appendChild(h('article', { class: 'viewer' },
+  root.appendChild(h('article', { class: 'viewer', dataset: { scene: 'tech' } },
+    h('div', { class: 'stripe', 'aria-hidden': 'true' }),
     h('header', { class: 'hero' },
       h('p', { class: 'kicker' }, APP_NAME),
       h('h1', null, 'This build could not be opened'),
     ),
     h('p', { class: 'error', role: 'alert' }, message),
     h('footer', { class: 'viewer-foot' },
-      h('a', { class: 'button primary', href: homeHref || './' }, 'Make a build sheet for your car'),
+      h('a', { class: 'button primary', href: homeHref || './' }, 'Make a tag for your car'),
     ),
   ));
 }

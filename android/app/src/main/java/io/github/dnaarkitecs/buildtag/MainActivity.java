@@ -55,6 +55,7 @@ public class MainActivity extends Activity {
         TYPES.put("svg", "image/svg+xml");
         TYPES.put("png", "image/png");
         TYPES.put("json", "application/json");
+        TYPES.put("woff2", "font/woff2");
     }
 
     WebView web;

@@ -11,12 +11,17 @@
 // compressed bytes written as digits cost about 2% extra in the QR, against 33%
 // for base64. The QR comes out roughly a quarter smaller, which is the
 // difference between a sticker that scans and one that does not.
-import { FORMAT_VERSION } from './config.js';
+import { FORMAT_VERSION, SCENE_IDS } from './config.js';
 import { normalizeBuild } from './model.js';
 
+// Version 2 added the optional keys s (style index), sp (specs as [kind,
+// value] pairs), sn (spec note) and tg (tags). A build that uses none of them
+// encodes to exactly the same link as v0.1, and a v0.1 page opening a v2 link
+// simply ignores the keys it does not know.
 const BUILD_KEYS = [
   ['year', 'y'], ['make', 'mk'], ['model', 'md'], ['trim', 'tr'],
   ['nickname', 'n'], ['owner', 'o'], ['about', 'd'], ['updated', 'u'],
+  ['specNote', 'sn'],
 ];
 // Each mod is stored as an array in this order, trailing blanks dropped.
 const MOD_FIELDS = ['brand', 'part', 'partNumber', 'link', 'notes'];
@@ -37,6 +42,10 @@ function toCompact(build) {
   const out = {};
   if (b.type === 'moto') out.t = 'm';
   for (const [long, short] of BUILD_KEYS) if (b[long]) out[short] = b[long];
+  const scene = SCENE_IDS.indexOf(b.scene);
+  if (scene > 0) out.s = scene;
+  if (b.specs.length) out.sp = b.specs.map((s) => [s.kind, s.value]);
+  if (b.tags.length) out.tg = b.tags;
   out.m = b.mods.map((m) => {
     const row = [m.category, ...MOD_FIELDS.map((k) => m[k])];
     while (row.length > 1 && row[row.length - 1] === '') row.pop();
@@ -51,6 +60,9 @@ function fromCompact(obj) {
   }
   const raw = { type: obj.t === 'm' ? 'moto' : 'car' };
   for (const [long, short] of BUILD_KEYS) raw[long] = obj[short];
+  raw.scene = obj.s;
+  raw.specs = Array.isArray(obj.sp) ? obj.sp.filter(Array.isArray).map((row) => ({ kind: row[0], value: row[1] })) : [];
+  raw.tags = Array.isArray(obj.tg) ? obj.tg : [];
   raw.mods = Array.isArray(obj.m)
     ? obj.m.filter(Array.isArray).map((row) => {
         const m = { category: row[0] };
