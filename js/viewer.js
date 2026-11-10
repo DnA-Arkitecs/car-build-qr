@@ -3,6 +3,7 @@
 import { APP_NAME } from './config.js';
 import { buildTitle, vehicleLine, groupMods } from './model.js';
 import { h, clear } from './elements.js';
+import { copyText as copyToClipboard } from './platform.js';
 
 export function partSearchUrl(mod) {
   const q = [mod.brand, mod.part, mod.partNumber].filter(Boolean).join(' ');
@@ -32,7 +33,7 @@ async function copyText(text, button) {
     setTimeout(() => { button.textContent = old; }, 1400);
   };
   try {
-    await navigator.clipboard.writeText(text);
+    await copyToClipboard(text);
     done('Copied');
   } catch {
     done('Hold to copy');

@@ -3,3 +3,10 @@ test/out/
 *.rgba
 .DS_Store
 Thumbs.db
+dist/
+android/.gradle/
+android/build/
+android/app/build/
+android/.android-user/
+android/local.properties
+android/app/src/main/assets/

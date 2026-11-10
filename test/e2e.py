@@ -133,6 +133,51 @@ def wait_for_qr(page, link_before=None):
     return page.get_attribute("a:text-is('See what people see')", "href")
 
 
+FAKE_APP = """window.__appCalls = [];
+window.BuildTagApp = {
+  saveFile: (name, type, b64) => { window.__appCalls.push(['save', name, type, atob(b64).slice(0, 4)]); return 'ok'; },
+  print: (title) => { window.__appCalls.push(['print', title]); },
+  copyText: (text) => { window.__appCalls.push(['copy', text]); return true; },
+};"""
+
+
+def app_mode_checks(browser, phone, base, c, errors):
+    """The page as the Android app runs it: window.BuildTagApp stands in for the
+    app's bridge (android/app/src/main/java/.../MainActivity.java)."""
+    public = subprocess.run(["node", "--input-type=module", "-e",
+                             "import { PUBLIC_URL } from './js/config.js'; process.stdout.write(PUBLIC_URL)"],
+                            cwd=str(ROOT), capture_output=True, text=True, timeout=60).stdout
+    ctx = browser.new_context(**phone)
+    ctx.add_init_script(FAKE_APP)
+    app = ctx.new_page()
+    watch(app, errors)
+    app.goto(base)
+    app.wait_for_selector("h1")
+    app.fill("input[name=make]", "Honda")
+    app.fill("input[name=model]", "Civic Si")
+    add_mod(app, "Suspension", "Tein", "Flex Z coilovers", "VSQ88-C1AS3")
+    local = wait_for_qr(app)
+    scanned = scan(app, ".sticker-preview svg")
+    calls = lambda: app.evaluate("() => window.__appCalls")  # noqa: E731
+    c("in the app, the QR points at the public site", scanned.startswith(public + "#1")
+      and scanned.split("#", 1)[1] == local.split("#", 1)[1], scanned[:60])
+    c("in the app, the preview opens inside the app", local.startswith(base + "#1"))
+    app.click("button:text-is('Copy link')")
+    c("in the app, Copy link goes through the phone's clipboard", ["copy", scanned] in calls())
+    app.locator("button", has_text="SVG").first.click()
+    app.wait_for_function("() => window.__appCalls.some(x => x[0] === 'save')", timeout=5000)
+    save = next(x for x in calls() if x[0] == "save")
+    c("in the app, a download is saved through the phone", save[1].endswith(".svg") and save[2] == "image/svg+xml"
+      and save[3] == "<svg", str(save))
+    app.locator(".print-buttons button:enabled").first.click()
+    c("in the app, print opens the phone's print screen", any(x[0] == "print" for x in calls()))
+    app.goto(local)
+    app.wait_for_selector("#build-title")
+    app.locator(".mod button:text-is('Copy')").first.click()
+    c("in the app, a part number copies through the phone", ["copy", "VSQ88-C1AS3"] in calls())
+    ctx.close()
+
+
 def suite(p, kind, base, tag):
     errors = []
     browser, phone, label = launch(p, kind)
@@ -303,6 +348,9 @@ def suite(p, kind, base, tag):
     np.wait_for_selector(".mod-row")
     c("edit a copy loads the build into the editor", np.locator(".mod-row").count() == 25
       and np.input_value("input[name=nickname]") == "Blue Thunder")
+
+    if kind == "android":
+        app_mode_checks(browser, phone, base, c, errors)
 
     # Playwright's WebKit screenshots add a <style> tag of their own, which the
     # page's policy (rightly) refuses. The app itself adds no inline style, which

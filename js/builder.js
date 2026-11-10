@@ -7,6 +7,7 @@ import { encodeBuild, shareUrl, compressionSupported } from './codec.js';
 import { gradeLink, moduleMatrix } from './qr.js';
 import { stickerSvg, dashCardSvg } from './sticker.js';
 import { h, clear, svgNode } from './elements.js';
+import { shareBase, saveFile, printPage, copyText } from './platform.js';
 
 export const STORAGE_KEY = 'buildtag.build.v1';
 
@@ -43,7 +44,8 @@ function textInput(name, value, { max, placeholder = '', inputmode, autocomplete
   return h('input', { name, value, maxLength: max, placeholder, inputmode, autocomplete, spellcheck: 'false' });
 }
 
-function download(filename, blob) {
+async function download(filename, blob) {
+  if (await saveFile(filename, blob)) return; // the Android app saved it to Downloads
   const url = URL.createObjectURL(blob);
   const a = h('a', { href: url, download: filename });
   document.body.appendChild(a);
@@ -336,8 +338,11 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     const id = ++runId;
     const stamped = { ...build, updated: todayISO() };
     let url;
+    let localUrl;
     try {
-      url = shareUrl(baseUrl, await encodeBuild(stamped));
+      const payload = await encodeBuild(stamped);
+      url = shareUrl(shareBase(baseUrl), payload); // what the QR and "Copy link" carry
+      localUrl = shareUrl(baseUrl, payload); // the preview opens here, also inside the app
     } catch (e) {
       if (id !== runId) return;
       meter.textContent = e.message;
@@ -361,7 +366,7 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     meter.className = `meter ${grade.level}`;
     preview.classList.toggle('card-preview', !grade.sticker);
     preview.appendChild(svgNode(grade.sticker ? currentSvg(null) : currentCard(false)));
-    actions.open.href = url;
+    actions.open.href = localUrl;
     setActions(true);
     actions.svg.textContent = grade.sticker ? 'Download SVG (for a sticker printer)' : 'Download dash card SVG';
     actions.png.disabled = !grade.sticker;
@@ -406,7 +411,7 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
   async function onCopyLink(e) {
     const button = e.currentTarget;
     try {
-      await navigator.clipboard.writeText(current.url);
+      await copyText(current.url);
       button.textContent = 'Link copied';
     } catch {
       prompt('Copy this link:', current.url);
@@ -442,7 +447,7 @@ export function renderBuilder(root, { baseUrl, initial } = {}) {
     for (let i = 0; i < format.perSheet; i++) {
       printArea.appendChild(svgNode(format.kind === 'card' ? currentCard() : currentSvg(format.inches)));
     }
-    window.print();
+    printPage();
   }
 
   function onExport() {
